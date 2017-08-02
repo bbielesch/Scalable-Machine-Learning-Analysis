@@ -1,0 +1,8 @@
+lookupVariable,lookupValue,newVariable,newValue,source
+step,dataUpload,phase,data,
+step,dataPreparation,phase,data,
+step,pipelineBuilding,phase,learning,
+step,modelBuilding,phase,learning,
+step,modelExamination,phase,prediction,
+step,prediction,phase,prediction,
+

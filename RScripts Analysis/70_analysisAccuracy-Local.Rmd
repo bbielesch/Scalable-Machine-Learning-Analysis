@@ -1,0 +1,174 @@
+---
+title: "Analysis of Data generate on Single-node Spark Cluster"
+author: "Bernhard Bielesch"
+output: 
+  html_document: 
+    highlight: tango
+    theme: cerulean
+---
+```{r setup}
+rm(list = ls()) # clean global environment
+includeDir <- "../include"
+source(file.path(includeDir, "includeRmd.R"))
+
+platform <- "Local" # Platfrom which generated data to analyze, either "Local" or "Scape01"
+```
+
+## Load necessary data
+```{r}
+#####################################################################
+
+load(file = file.path(dataDir, paste0("outputParamsExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("applicationsRuntimeExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("jobsRuntime-", platform, ".Rda")))
+```
+
+## Build Random Forest to verify Variable Importance for Accuracy
+
+### Preparations for Forest Building
+```{r}
+dropCols <- c("id", "appName", "cluster",
+              "startTime", "endTime",
+              "lastUpdated", "features",
+              "featuresName", "split",
+              "testObservations", "duration", "testError")
+factorCols <- c("algorithm", "classification")
+integerCols <- c("dimensions", "trainObservations")
+
+treeAppAccuracy <- 
+  applicationsRuntimeExt %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.))) %>%
+  mutate_at(.vars = integerCols, .fun = funs(as.integer(.))) %>% 
+  mutate(dimensions = as.integer(dimensions)) %>%
+  mutate(trainObservations = as.integer(trainObservations)) %>%
+  mutate(accuracy = 1 - testError) %>%
+  select(-one_of(dropCols))
+
+Desc(treeAppAccuracy)
+
+```
+
+### Building the forest and visualize Variable Importance
+```{r}
+#####################################################################
+## Random Forest overall
+#####################################################################
+
+# prepare tree building
+response <- "accuracy"
+features <- setdiff(names(treeAppAccuracy), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfModel <- randomForest(mlformula, data = treeAppAccuracy, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+```
+
+### Visualize Variable Importance
+```{r}
+print(rfModel)
+importance(rfModel)
+```
+
+```{r}
+varImpPlot(rfModel, main = "Variable Importance for Accuracy")
+```
+
+### Visualize Variable Importance (Alternative)
+```{r}
+# Extracts variable importance and processed information
+varImportance <- data.frame(importance(rfModel)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Variable Importance from Random Forest for Accuracy") + 
+  labs(x = "Variable", y = "Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+# ggsave(file = file.path(plotDir, platform,
+#                         paste0("accuracyVariableImportance-", platform, ".png")))
+```
+
+## Visualization of Accuracy/Error rate
+```{r}
+applicationsRuntimeExt %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  mutate(accuracy = 1 - testError) %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = trainObservations, color = accuracy, 
+                            size = accuracy, shape = algorithm), alpha = 0.5) +
+  labs(color = "Accuracy", size = "Accuracy") +
+  ggtitle("Accuracy for dimensions/training observations") +
+  labs(x = "Dimensions", y = "No of Training Observations") +
+  scale_color_gradient(labels = comma, low = "red", high = "green") +
+  scale_y_continuous(labels = comma)
+# ggsave(file = file.path(plotDir, platform,
+#                         paste0("accuracyDimensionsTrainObservations-", platform, ".png")))
+```
+
+### Table with highest accuracy
+```{r eval = FALSE}
+tableColumns <- c("algorithm", "classification", "featuresName", "split", "accuracy")
+outputParamsExt %>%
+  mutate(accuracy = 1 - testError) %>%
+  arrange(desc(accuracy)) %>%
+  group_by_(.vars = tableColumns) %>%
+  select(one_of(tableColumns)) %>%
+  filter(row_number() <= 20L) %>%
+  htmlTable()
+```
+
+### Check for strange accuracy information for logistics regression
+```{r eval = FALSE}
+tableColumns <- c("algorithm", "classification", "featuresName", "split", "accuracy")
+outputParamsExt %>%
+  mutate(accuracy = 1 - testError) %>%
+  filter(algorithm == "LogReg") %>%
+  arrange(desc(accuracy)) %>%
+  group_by_(.vars = tableColumns) %>%
+  select(one_of(tableColumns)) %>%
+  filter(row_number() <= 40L) %>%
+  htmlTable()
+```
+
+## Visualization of Accuracy/Error rate Random Forest Algorithm
+```{r}
+applicationsRuntimeExt %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  mutate(accuracy = 1 - testError) %>%
+  filter(algorithm == "RF") %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = trainObservations, color = accuracy, 
+                            shape = algorithm), alpha = 0.5) +
+  labs(color = "Accuracy") +
+  ggtitle("Accuracy Dimension/Training Observations (RF)") +
+  labs(x = "Dimensions", y = "No of Training Observations") +
+  scale_color_gradient(labels = comma, low = "green", high = "red") +
+  scale_y_continuous(labels = comma)
+# ggsave(file = file.path(plotDir, platform,
+#                         paste0("accuracyDimensionsTrainObservations-", platform, ".png")))
+```
+
+## Visualization of Accuracy/Error rate Logistics Regression Algorithm
+```{r}
+applicationsRuntimeExt %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  mutate(accuracy = 1 - testError) %>%
+  filter(algorithm == "LogReg") %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = trainObservations, color = accuracy, 
+                            shape = algorithm), alpha = 0.5) +
+  labs(color = "Accuracy") +
+  ggtitle("Accuracy Dimensions/Training Observations (LogReg)") +
+  labs(x = "Dimensions", y = "No of Training Observations") +
+  scale_color_gradient(labels = comma, low = "green", high = "red") +
+  scale_y_continuous(labels = comma)
+# ggsave(file = file.path(plotDir, platform,
+#                         paste0("accuracyDimensionsTrainObservations-", platform, ".png")))
+```
+

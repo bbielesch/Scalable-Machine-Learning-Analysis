@@ -1,0 +1,198 @@
+---
+title: "Analysis of Data generate on Single-node Spark Cluster"
+author: "Bernhard Bielesch"
+output: 
+  html_document: 
+    highlight: tango
+    theme: cerulean
+---
+```{r setup}
+rm(list = ls()) # clean global environment
+includeDir <- "../include"
+source(file.path(includeDir, "includeRmd.R"))
+
+platform <- "Scape01" # could also be "Local" or "Scape02"
+```
+
+## Load necessary data
+```{r}
+#####################################################################
+
+load(file = file.path(dataDir, paste0("outputParamsExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("stepsRuntime-", platform, ".Rda")))
+```
+
+## Analze mean, median and sd of data
+```{r}
+stepsRuntime %>%
+  group_by_(.dots = c("step")) %>%
+  summarize(meanDuration = mean(stepDuration),
+            medianDuration = median(stepDuration),
+            sdDuration = sd(stepDuration)) %>%
+  htmlTable(align = "lrrr")
+```
+
+```{r}
+
+roundCols <- c("meanPerc", "medianPerc", "sdPerc")
+stepsRuntime %>%
+  group_by_(.dots = c("step")) %>%
+  summarize(meanPerc = mean(stepPerc),
+            medianPerc = median(stepPerc),
+            sdPerc = sd(stepPerc)) %>%
+  mutate_at(.vars = roundCols, .funs = funs(round(., 3))) %>%
+  mutate(step = as.character(step)) %>%
+  htmlTable(align = "lrrr")
+```
+
+```{r}
+stepsRuntime %>%
+  ggplot(mapping = aes(x = stepPerc)) +
+  geom_density() +
+  facet_wrap(~ step, nrow = 3, ncol = 2) +
+  ggtitle("Distribution of Runtime Shares") +
+  labs(x = "Share Runtime", y = "Density")
+``` 
+
+## Variable Importance for modelBuilding
+
+### Prepare data
+```{r}
+dropCols <- c("id", "appName", "cluster", "features", "featuresName", "split", 
+              "appDuration", "stepPerc", "duration", "testObservations", "testError")
+factorCols <- c("algorithm", "classification", "coresMax", "execMem") # this line differs from Local to Scape01
+integerCols <- c("dimensions", "trainObservations")
+
+treeStepModelBuilding <- 
+  stepsRuntime %>%
+  ungroup() %>%
+  filter(step == "modelBuilding") %>% ## only modelBuilding steps is important
+  select(-one_of(c("step"))) %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = integerCols, .funs = funs(as.integer(.))) %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.)))
+  # mutate(modelSize = dimensions * trainObservations)
+
+Desc(treeStepModelBuilding)
+```
+
+### Build Random Forest Model
+```{r}
+# prepare tree building
+response <- "stepDuration"
+features <- setdiff(names(treeStepModelBuilding), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfModelBuilding <- randomForest(mlformula, data = treeStepModelBuilding, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+htmlTable(importance(rfModelBuilding))
+```
+
+### Extracts variable importance and processed information
+```{r}
+varImportance <- data.frame(importance(rfModelBuilding)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Variable Importance from Random Forest (Model Building)") + 
+  xlab("Variable") + ylab("Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+```
+
+## Variable Importance for prediction
+
+### Prepare data
+```{r}
+dropCols <- c("id", "appName", "cluster", "features", "featuresName", "split", 
+              "appDuration", "stepPerc", "duration", "trainObservations", "testError")
+factorCols <- c("algorithm", "classification", "coresMax", "execMem") # another line different between Scape01 and Local
+integerCols <- c("dimensions", "testObservations")
+
+treeStepPrediction <- 
+  stepsRuntime %>%
+  ungroup() %>%
+  filter(step == "prediction") %>% ## only prediction step
+  select(-one_of(c("step"))) %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = integerCols, .funs = funs(as.integer(.))) %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.)))
+
+Desc(treeStepPrediction)
+```
+
+### Build Random Forest Model
+```{r}
+# prepare tree building
+response <- "stepDuration"
+features <- setdiff(names(treeStepPrediction), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfPrediction <- randomForest(mlformula, data = treeStepPrediction, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+htmlTable(importance(rfPrediction))
+```
+
+### Extracts variable importance and processed information
+```{r}
+varImportance <- data.frame(importance(rfPrediction)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Variable Importance from Random Forest (Prediction)") + 
+  xlab("Variable") + ylab("Variable Importance (Mean Decrease in MSE)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+```
+
+
+## Lets take a close look at the distribution of machine learning shares
+```{r}
+machineLearningRuntime <-
+  stepsRuntime %>%
+  filter(step == "modelBuilding" | step == "pipelineBuilding")
+
+machineLearningRuntime %>%
+  ggplot(mapping = aes(x = stepPerc)) +
+  geom_density() +
+  ggtitle("Distribution of Machine Learning Runtime") +
+  labs(x = "Machine Learning Runtime as a Percentage of Total Runtime", y = "Density")
+```
+
+### And now an even more detailed look
+```{r}
+
+# these are the probabilities for 1, 2 and 3 standard deviations starting from the smallest
+probs <- c(.001, .023, .159, .841, .977, .999)
+mlQuantiles <- quantile(machineLearningRuntime$stepPerc, probs)
+mlDensity  <- bind_cols(density(machineLearningRuntime$stepPerc)[c("x", "y")])
+
+machineLearningRuntime %>%
+  ggplot(mapping = aes(x = stepPerc)) +
+  geom_density() +
+  ggtitle("Distribution of Machine Learning Runtime") +
+  labs(x = "Machine Learning Runtime as a Percentage of Total Runtime", y = "Density") +
+  geom_area(data = subset(mlDensity, x >= mlQuantiles[3] & x <= mlQuantiles[4]), # 1 Std 68.2%
+              aes(x = x,y = y), fill='#619CFF', alpha=0.8) +
+  geom_area(data = subset(mlDensity, x >= mlQuantiles[2] & x <= mlQuantiles[5]), # 2 Std 95.4%
+            aes(x = x,y = y), fill='#619CFF', alpha=0.6) +
+  geom_area(data = subset(mlDensity, x >= mlQuantiles[1] & x <= mlQuantiles[6]), # 3 Std 99.8%
+            aes(x = x,y = y), fill='#619CFF', alpha=0.3) +
+  geom_vline(xintercept = mean(machineLearningRuntime$stepPerc)) +
+  geom_vline(xintercept = median(machineLearningRuntime$stepPerc), color='#FFFFFF')
+```
+

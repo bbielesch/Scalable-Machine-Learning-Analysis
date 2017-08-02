@@ -1,0 +1,14 @@
+featuresName;features;dimensions
+Marsyas;Marsyas;124
+MFCC;mfcc;26
+Spectral;spec;16
+SpectralDerivatives;SpectralDerivatives;96
+MethodsOfMoments;methods_of_moments;10
+AreaOfMoments;area_of_moments;20
+LinearPredictiveCoding;lpc;20
+RhythmPatterns;rp;1440
+StatSpectrumDescriptors;ssd;168
+RhythmHistograms;rh;60
+ModulationFreqVarianceDescriptors;mvd;420
+TemporalStatSpectrumDesc;tssd;1176
+TemporalRhythmHistograms;trh;420

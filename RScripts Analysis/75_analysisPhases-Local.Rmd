@@ -1,0 +1,256 @@
+---
+title: "Analysis of Data generate on Single-node Spark Cluster"
+author: "Bernhard Bielesch"
+output: 
+  html_document: 
+    highlight: tango
+    theme: cerulean
+---
+```{r setup}
+rm(list = ls()) # clean global environment
+includeDir <- "../include"
+source(file.path(includeDir, "includeRmd.R"))
+
+platform <- "Local" # could also be "Local" or "Scape02"
+```
+
+## Load necessary data
+```{r}
+#####################################################################
+
+load(file = file.path(dataDir, paste0("outputParamsExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("phasesRuntime-", platform, ".Rda")))
+```
+
+## Analze max, min, mean, median and sd of data
+```{r}
+phasesRuntime %>%
+  group_by_(.dots = c("phase")) %>%
+  summarize(maxDuration = max(phaseDuration),
+            minDuration = min(phaseDuration),
+            meanDuration = mean(phaseDuration),
+            medianDuration = median(phaseDuration),
+            sdDuration = sd(phaseDuration)) %>%
+  mutate(phase = as.character(phase))
+```
+
+## Analyze max, min, mean, median and sd of percentages
+```{r}
+
+roundCols <- c("maxPerc", "minPerc", "meanPerc", "medianPerc", "sdPerc")
+phasesRuntime %>%
+  group_by_(.dots = c("phase")) %>%
+  summarize(maxPerc = max(phasePerc),
+            minPerc = min(phasePerc),
+            meanPerc = mean(phasePerc),
+            medianPerc = median(phasePerc),
+            sdPerc = sd(phasePerc)) %>%
+  mutate_at(.vars = roundCols, .funs = funs(round(., 3))) %>%
+  mutate(phase = as.character(phase))
+```
+
+## Variable Importance for modelBuilding
+
+### Build Random Forest Model
+```{r}
+dropCols <- c("id", "appName", "cluster", "features", "featuresName", "split", 
+              "appDuration", "phasePerc", "duration", "testObservations", "testError")
+factorCols <- c("algorithm", "classification")
+integerCols <- c("dimensions", "trainObservations")
+
+treePhaseLearning <- 
+  phasesRuntime %>%
+  ungroup() %>%
+  filter(phase == "learning") %>%
+  select(-one_of(c("phase"))) %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = integerCols, .funs = funs(as.integer(.))) %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.)))
+
+Desc(treePhaseLearning)
+```
+
+```{r}
+# prepare tree building
+response <- "phaseDuration"
+features <- setdiff(names(treePhaseLearning), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfPhaseLearning <- randomForest(mlformula, data = treePhaseLearning, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+importance(rfPhaseLearning)
+```
+
+### Extracts variable importance and processed information
+```{r}
+varImportance <- data.frame(importance(rfPhaseLearning)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Learning Phase: Variable Importance from Random Forest") + 
+  xlab("Variable") + ylab("Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+```
+
+### Curve of Learning phase duration vs. dimensions and trainObservations
+```{r}
+breaksDurationsLog <- c(50000, 250000, 500000, 750000, 1000000, 1250000)
+  
+phasesRuntime %>%
+  ungroup() %>%
+  filter(phase == "learning") %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = phaseDuration, color = trainObservations), alpha = 0.5) +
+  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+  scale_colour_continuous(labels = comma) +
+  labs(color = "Training Observations") +
+  ggtitle("Learning Phase: Duration per dimensions") +
+  labs(x = "Dimensions", y = "Duration (ms)")
+
+ggsave(file = file.path(plotDir, platform, 
+                        paste0("phaseDurationLearning-", platform, ".png")))
+```
+
+## Variable Importance for Data Phase
+
+### Build Random Forest Model
+```{r}
+dropCols <- c("id", "appName", "cluster", "features", "featuresName", "split", 
+              "appDuration", "phasePerc", "duration", "testObservations", "testError")
+factorCols <- c("algorithm", "classification")
+integerCols <- c("dimensions", "trainObservations")
+
+treePhaseData <- 
+  phasesRuntime %>%
+  ungroup() %>%
+  filter(phase == "data") %>%
+  select(-one_of(c("phase"))) %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = integerCols, .funs = funs(as.integer(.))) %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.)))
+
+Desc(treePhaseData)
+```
+
+```{r}
+# prepare tree building
+response <- "phaseDuration"
+features <- setdiff(names(treePhaseData), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfPhaseData <- randomForest(mlformula, data = treePhaseData, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+importance(rfPhaseData)
+```
+
+### Extracts variable importance and processed information
+```{r}
+varImportance <- data.frame(importance(rfPhaseData)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Data Phase: Variable Importance from Random Forest") + 
+  xlab("Variable") + ylab("Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+```
+
+### Curve of Data phase duration vs. dimensions and trainObservations
+```{r}
+breaksDurationsLog <- c(25000, 50000, 100000, 150000, 250000)
+phasesRuntime %>%
+  ungroup() %>%
+  filter(phase == "data") %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = phaseDuration, color = trainObservations), alpha = 0.5) +
+  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+  scale_colour_continuous(labels = comma) +
+  labs(color = "Training Observations") +
+  ggtitle("Data Phase: Duration per dimensions") +
+  labs(x = "Dimensions", y = "Duration (ms)")
+ggsave(file = file.path(plotDir, platform, 
+                        paste0("phaseDurationData-", platform, ".png")))
+```
+## Variable Importance for Prediction Phase
+
+### Build Random Forest Model
+```{r}
+dropCols <- c("id", "appName", "cluster", "features", "featuresName", "split", 
+              "appDuration", "phasePerc", "duration", "trainObservations", "testError")
+factorCols <- c("algorithm", "classification")
+integerCols <- c("dimensions", "testObservations")
+
+treePhasePrediction <- 
+  phasesRuntime %>%
+  ungroup() %>%
+  filter(phase == "prediction") %>%
+  select(-one_of(c("phase"))) %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = integerCols, .funs = funs(as.integer(.))) %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.)))
+
+Desc(treePhasePrediction)
+```
+
+
+```{r}
+# prepare tree building
+response <- "phaseDuration"
+features <- setdiff(names(treePhasePrediction), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfPhasePrediction <- randomForest(mlformula, data = treePhasePrediction, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+importance(rfPhasePrediction)
+```
+
+### Extracts variable importance and processed information
+```{r}
+varImportance <- data.frame(importance(rfPhasePrediction)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Prediction Phase: Variable Importance from Random Forest") + 
+  xlab("Variable") + ylab("Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+```
+
+### Curve of Prediction phase duration vs. dimensions and testObservations
+```{r}
+breaksDurationsLog <- c(25000, 50000, 100000, 150000, 250000, 350000)
+phasesRuntime %>%
+  ungroup() %>%
+  filter(phase == "prediction") %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = phaseDuration, color = testObservations), alpha = 0.5) +
+  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+  scale_colour_continuous(labels = comma) +
+  labs(color = "Test Observations") +
+  ggtitle("Prediction Phase: Duration per dimensions") +
+  labs(x = "Dimensions", y = "Duration (ms)")
+ggsave(file = file.path(plotDir, platform, 
+                        paste0("phaseDurationPrediction-", platform, ".png")))
+```

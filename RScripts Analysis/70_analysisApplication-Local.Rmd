@@ -1,0 +1,327 @@
+---
+title: "Analysis of Data generate on Single-node Spark Cluster"
+author: "Bernhard Bielesch"
+output: 
+  html_document: 
+    highlight: tango
+    theme: cerulean
+---
+```{r setup}
+rm(list = ls()) # clean global environment
+includeDir <- "../include"
+source(file.path(includeDir, "includeRmd.R"))
+
+platform <- "Local"
+```
+
+## Load necessary data
+```{r}
+#####################################################################
+
+load(file = file.path(dataDir, paste0("outputParamsExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("applicationsRuntimeExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("jobsRuntime-", platform, ".Rda")))
+```
+
+## Find interesting application runs
+```{r}
+importantCols <- c("duration", "algorithm", "classification", "featuresName", "dimensions")
+applicationsRuntimeExt %>%
+  select(one_of(importantCols)) %>%
+  arrange(desc(duration)) %>%
+  head(10) %>%
+  htmlTable()
+```
+
+```{r}
+applicationsRuntimeExt %>%
+  filter(duration == max(duration)) %>%
+  str()
+```
+
+```{r}
+applicationsRuntimeExt %>%
+  filter(duration == min(duration)) %>%
+  str()
+```
+
+```{r}
+applicationsRuntimeExt %>%
+  ggplot(mapping = aes(x = duration)) +
+  geom_density() +
+  ggtitle("Distribution of durations") +
+  labs(x = "Runtime (ms)", y = "Density")
+ggsave(file = file.path(plotDir, platform, 
+                        paste0("distributionDurations-", platform, ".png")))
+```
+## Correlation analysis as preparation of Random Forest building
+```{r}
+# http://rpubs.com/melike/corrplot
+
+dropCols <- c("id", "appName", # administrative information
+              "cluster", # only one value
+              "startTime", "endTime", "lastUpdated", # data and time information
+              "testError", # accuracy is a result of duration and not vice versa
+              "split", 
+              "featuresName", "features")
+factorCols <- c("algorithm", "classification")
+integerCols <- c(factorCols, "dimensions") # correlation can only work with numbers, not factors
+
+treeCorr <- 
+  applicationsRuntimeExt %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = factorCols, .fun = funs(as.factor(.))) %>%
+  mutate_at(.vars = integerCols, .fun = funs(as.integer(.))) %>%
+  cor()
+
+library(corrplot)
+corrplot(treeCorr, title = "Correlation of possible input values for duration")
+
+# method = to determine the shape of the correlation objects. Can take the values: “circle” (default), “square”, “ellipse”, “number”, “pie”, “shade” and “color”.
+# outline = to draw the black outline of the correlation objects such as circles or squares.
+# addgrid.col = to determine the color of the grids. Would dissapear if NA.
+# order = the order of the columns. If not specified it is plotted as in the original matrix, but sometimes it is not so informative. Possible methods are: “AOE” (angular order of the eigenvectors), “FPC” (first principal component), “hclust”, “alphabet”. There is also hclust.method to determine the agglomeration method if the order is “hclust”.
+# addrect = when the order is “hclust”, determines the number of rectangles according to the hierarchical cluster. rect.something arguments are about the rectangles added according to this argument.
+# cl.something = these are the arguments about the color legend.
+# tl.something = these are the arguments about the text labels.
+# addCoef.col = to add the correlation coefficients
+# number.digits = to determine the number of digits added to plot
+# col = color spectrum used for the plot
+```
+### Correlation plot with ggplot2
+```{r}
+# http://www.sthda.com/english/wiki/ggplot2-quick-correlation-matrix-heatmap-r-software-and-data-visualization
+
+meltedTreeCorr <- melt(treeCorr)
+ggplot(data = meltedTreeCorr, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = "red", high = "blue", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  ggtitle("Correlation of possible predictors for duration") +
+  labs(x = "Variable 1", y = "Variable 2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(angle = 45, hjust = 1))
+ggsave(file = file.path(plotDir, platform,
+                        paste0("correlationInputVarImp-", platform, ".png")))
+```
+
+## Build Random Forest to verify Variable Importance
+
+### Preparations for Forest Building
+```{r}
+dropCols <- c("id", "appName", "cluster",
+              "startTime", "endTime",
+              "lastUpdated", "features",
+              "featuresName", "split",
+              "testObservations", "testError")
+factorCols <- c("algorithm", "classification")
+integerCols <- c("dimensions", "trainObservations")
+
+treeAppRuntime <- 
+  applicationsRuntimeExt %>%
+  select(-one_of(dropCols)) %>%
+  mutate_at(.vars = factorCols, .fun = funs(factor(.))) %>%
+  mutate_at(.vars = integerCols, .fun = funs(as.integer(.))) %>% 
+  mutate(dimensions = as.integer(dimensions)) %>%
+  mutate(trainObservations = as.integer(trainObservations))
+
+# Desc(treeAppRuntime)
+
+```
+
+### Building the forest and visualize Variable Importance
+```{r}
+#####################################################################
+## Random Forest overall
+#####################################################################
+
+# prepare tree building
+response <- "duration"
+features <- setdiff(names(treeAppRuntime), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+
+set.seed(50040)
+rfModel <- randomForest(mlformula, data = treeAppRuntime, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+```
+
+### Visualize Variable Importance
+```{r}
+print(rfModel)
+importance(rfModel)
+```
+
+```{r}
+varImpPlot(rfModel, main = "Variable Importance for Duration")
+```
+
+### Visualize Variable Importance (Alternative)
+```{r}
+# Extracts variable importance and processed information
+varImportance <- data.frame(importance(rfModel)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Variable Importance for Duration (Overall)") + 
+  labs(x = "Variable", y = "Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+ggsave(file = file.path(plotDir, platform,
+                        paste0("variableImportance-", platform, ".png")))
+```
+
+### Additional Visualization
+```{r}
+op = par(mfrow = c(1, 2))
+plot(rfModel, main = "RF Model")
+plot( importance(rfModel), lty=2, pch=16)
+lines(importance(rfModel))
+op = par(mfrow = c(1,1))
+
+# Does a negative %IncMSE show a "bad" variable?
+# 
+# IncMSE: The way this is calculated is by computing the MSE of the whole model initially. 
+# Let's call this MSEmod. After this for each one of the variables (columns in your data set)
+# the values are randomly shuffled (permuted) so that a "bad" variable is being created and 
+# a new MSE is being calculated. I.e. imagine for that for one column you had rows 1,2,3,4,5. 
+# After the permutation these will end up being 4,3,1,2,5 at random. After the permutation 
+# (all of the other columns remain exactly the same since we want to examine col1's importance), 
+# the new MSE of the model is being calculated, let's call it MSEcol1 (in a similar manner you 
+# will have MSEcol2, MSEcol3 but let's keep it simple and only deal with MSEcol1 here). 
+# We would expect that since the second MSE was created using a variable completely random, 
+# MSEcol1 would be higher than MSEmod (the higher the MSE the worse). Therefore, when we take 
+# the difference of the two MSEcol1 - MSEmod we usually expect a positive number. In your case 
+# a negative number shows that the random variable worked better, which shows that it probably 
+# the variable is not predictive enough i.e. not important.
+# 
+# Keep in mind that this description I gave you is the high level, in reality the two MSE values 
+# are scaled and the percentage difference is being calculated. But the high level story is this.
+# 
+# In algorithm form:
+# 1) Compute model MSE
+# 2) For each variable in the model: Permute variable
+#     Calculate new model MSE according to variable permutation
+#     Take the difference between model MSE and new model MSE
+# 3) Collect the results in a list
+# 4) Rank variables' importance according to the value of the %IncMSE. 
+# The greater the value the better
+```
+
+### Analyze only one algorithm
+```{r}
+#####################################################################
+## look at one algorithm separately - this time RF
+#####################################################################
+
+dropColsAlgorithm <- c("algorithm")
+
+treeAppRuntimeRF <- 
+  treeAppRuntime %>%
+  filter(algorithm == "RF") %>%
+  select(-one_of(dropColsAlgorithm)) # eliminate column with one value
+
+responseRF <- "duration"
+featuresRF <- setdiff(names(treeAppRuntimeRF), c(response))
+mlformulaRF <- reformulate(termlabels = featuresRF, response = responseRF)  
+
+set.seed(50040)
+rfModelRF <- randomForest(mlformulaRF, data = treeAppRuntimeRF, 
+                          ntree = 150, keep.inbag = TRUE, importance = TRUE)
+print(rfModelRF)
+importance(rfModelRF)
+
+# varImpPlot(rfModelRF, main = "Variable Importance for Duration")
+```
+
+```{r}
+varImportanceRF <- data.frame(importance(rfModelRF)) 
+varImportanceRF %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+               
+varImportanceRF %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Variable Importance for Duration (only RF)") + 
+  xlab("Variable Name") + ylab("Variable Importance (Mean Decrease in MSE)") +
+  scale_x_discrete(limits = as.character(varImportanceRF$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportanceRF$variable))
+ggsave(file = file.path(plotDir, platform,
+                        paste0("variableImportanceRF-", platform, ".png")))
+```
+
+## Plots for Visualization
+
+### Duration per Dimension
+```{r}
+breaksDurationsLog <- c(50000, 250000, 500000, 750000, 1000000, 1250000)
+applicationsRuntimeExt %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = duration, color = trainObservations), alpha = 0.5) +
+  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+  scale_colour_continuous(labels = comma) +
+  labs(color = "Training Observations") +
+  ggtitle("Duration per dimensions") +
+  labs(x = "Dimensions", y = "Duration (ms)")
+ggsave(file = file.path(plotDir, platform,
+                        paste0("durationDimensions-", platform, ".png")))
+```
+
+### Duration per Trainings Observations
+```{r}
+breaksObservationsLog <- c(25000, 50000, 125000, 250000)
+applicationsRuntimeExt %>%
+  mutate(dimensions = as.integer(dimensions)) %>%
+  ggplot(mapping = aes(x = trainObservations)) + 
+  geom_jitter(mapping = aes(y = duration, color = dimensions,
+                            size = dimensions, shape = algorithm), alpha = 0.5) +
+  scale_x_log10(labels = comma, breaks = breaksObservationsLog) +
+  scale_y_continuous(labels = comma, breaks = breaksDurationsLog) +
+  labs(color = "Dimensions", size = "Dimensions") +
+  ggtitle("Duration per training observations") +
+  labs(x = "Training Observations", y = "Duration (ms)")
+ggsave(file = file.path(plotDir, platform,
+                        paste0("durationTrainObservations-", platform, ".png")))
+```
+
+## Duration per Dimensions
+```{r}
+applicationsRuntimeExt %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>%
+  ggplot(mapping = aes(x = dimensions)) + 
+  geom_jitter(mapping = aes(y = duration, color = trainObservations, 
+                            size = trainObservations, shape = algorithm), alpha = 0.5) +
+  labs(color = "Training Observations", size = "Training Observations") +
+  scale_y_log10(labels = comma,  breaks = breaksDurationsLog) +
+  ggtitle("Duration per dimensions") +
+  labs(x = "Dimensions", y = "Duration (ms)") +
+  scale_colour_continuous(labels = comma) +
+  scale_size_continuous(labels = comma)
+ggsave(file = file.path(plotDir, platform,
+                        paste0("durationDimensionsTrainObservations-", platform, ".png")))
+```
+
+3D Plot for Duration vis-a-vis Training Observations and Dimensions
+```{r}
+library(plot3D)
+options(scipen = 100000)
+scatter3D(applicationsRuntimeExt$trainObservations, 
+          as.integer(applicationsRuntimeExt$dimensions), 
+          applicationsRuntimeExt$duration,
+          pch = 19, bty = "g", col = ramp.col(c("darkblue", "lightblue")), 
+          phi = 0, ticktype = "detailed",
+          main = "Duration",
+          xlab = "Training Observations",
+          ylab = "Dimensions",
+          zlab = "Duration")
+```
+
+

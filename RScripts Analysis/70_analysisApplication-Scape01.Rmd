@@ -1,0 +1,462 @@
+---
+title: "Analysis of Data generate on Spark Cluster Scape01"
+author: "Bernhard Bielesch"
+output: 
+html_document: 
+highlight: tango
+theme: cerulean
+---
+
+```{r setup}
+rm(list = ls()) # clean global environment
+includeDir <- "../include"
+source(file.path(includeDir, "includeRmd.R"))
+
+platform <- "Scape01" # could also be "Local" or "Scape02"
+```
+
+## Load necessary data
+```{r}
+load(file = file.path(dataDir, paste0("outputParamsExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("applicationsRuntimeExt-", platform, ".Rda")))
+load(file = file.path(dataDir, paste0("jobsRuntime-", platform, ".Rda")))
+```
+
+## Calculate overall median, mean and duration
+```{r}
+summaryAppRuntime <-
+  applicationsRuntimeExt %>%
+  mutate(coresMax = as.integer(coresMax)) %>%
+  group_by(coresMax) %>%
+  summarise(medianDuration = median(duration),
+            meanDuration = mean(duration),
+            sdDuration = sd(duration)) %>%
+  arrange(coresMax)
+
+summaryAppRuntime
+```
+## Build Random Forest to establish Variable Importance
+
+### Preparations for Tree/Forest Building
+```{r}
+dropCols <- c("id", "appName", "cluster", 
+              "startTime", "endTime", 
+              "lastUpdated", "features",
+              "featuresName", "split", 
+              "testObservations", "testError")
+
+factorCols <- c("algorithm", "classification", "coresMax", "execMem")
+
+treeAppRuntime <- 
+  applicationsRuntimeExt %>%
+  select(-one_of(dropCols)) %>%
+  mutate(dimensions = as.integer(dimensions)) %>%
+  mutate(trainObservations = as.integer(trainObservations)) %>%
+  mutate_at(.cols = factorCols, .fun = funs(factor(.)))
+
+str(treeAppRuntime) # to check all the conversions
+Desc(treeAppRuntime)
+```
+```{r}
+# prepare tree building
+response <- "duration"
+features <- setdiff(names(treeAppRuntime), c(response))
+mlformula <- reformulate(termlabels = features, response = response)  
+```
+
+### ctree Decision tree
+```{r eval = FALSE}
+# library(party)
+library(partykit)
+
+set.seed(50040)
+ctreeModel <- ctree(mlformula, data = treeAppRuntime)
+class(ctreeModel)
+
+plot(ctreeModel, type = "simple", main = "Conditional Inference Tree")
+```
+
+### Random Forest
+```{r}
+set.seed(50040)
+rfModel <- randomForest(mlformula, data = treeAppRuntime, 
+                        ntree = 150, keep.inbag = TRUE, importance = TRUE)
+print(rfModel)
+importance(rfModel)
+
+varImpPlot(rfModel, main = "Variable Importance for Duration")
+```
+
+```{r}
+op = par(mfrow=c(1, 2))
+plot(rfModel, main = "RF Model")
+plot( importance(rfModel), lty=2, pch=16)
+lines(importance(rfModel))
+```
+
+```{r}
+# Partial Dependence Plot
+imp = importance(rfModel)
+impvar = rownames(imp)[order(imp[, 1], decreasing=TRUE)]
+op = par(mfrow=c(3,2))
+for (i in seq_along(impvar)) {
+  partialPlot(rfModel, treeAppRuntime, impvar[i], xlab=impvar[i],
+              main=paste(impvar[i])) # Partial Dependence on...
+}
+```
+
+### Variable Importance Plot (Alternative)
+
+```{r}
+# Extracts variable importance and processed information
+varImportance <- data.frame(importance(rfModel)) 
+varImportance %<>%
+  mutate(variable = as.factor(rownames(.))) %>%
+  rename(PercIncMSE = X.IncMSE) %>%
+  arrange(desc(PercIncMSE))
+
+varImportance %>%
+  ggplot(aes(x = variable, weight = PercIncMSE, fill = variable)) +
+  geom_bar() + ggtitle("Variable Importance from Random Forest") + 
+  labs(x = "Variable", y = "Variable Importance (Mean Decrease in MSE)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_x_discrete(limits = as.character(varImportance$variable)) +
+  scale_fill_discrete(name = "Variable Name",
+                      breaks = as.character(varImportance$variable))
+ggsave(file = file.path(plotDir, platform,
+                        paste0("varImportance-", platform, ".png")))
+```
+
+## Graphical Representations
+
+### This is the distribution of runtimes
+```{r}
+breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
+applicationsRuntimeExt %>%
+  ggplot(mapping = aes(duration)) + 
+  geom_histogram(bins = 40) +
+  ggtitle("Distribution of Runtimes") +
+  labs(x = "Duration (in ms)", y = "Number of Observations") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_log10(labels = comma, breaks = breaksDurationsLog)
+```
+```{r}
+breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
+applicationsRuntimeExt %>%
+  ggplot(mapping = aes(duration)) + 
+  geom_density() +
+  ggtitle("Density of Runtimes") +
+  labs(x = "Duration (in ms)", y = "Number of Observations") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_log10(labels = comma, breaks = breaksDurationsLog)
+
+```
+
+### This is the boxplot of duration across number of cores
+```{r}
+breaksDurations <- c(250000, 500000, 750000, 1000000, 1250000, 1500000)
+applicationsRuntimeExt %>%
+  ggplot(mapping = aes(x = as.integer(coresMax),
+                       y = duration, group = coresMax)) +
+  geom_boxplot() +
+  ggtitle("Duration per Number of Cores") + 
+  labs(x = "Number of Cores", y = "Duration (in ms)") +
+  coord_cartesian(ylim = c(0, 1500000)) + # cut off unnecessary outliers above boxes
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  scale_y_continuous(labels = comma, breaks = breaksDurations)
+```
+
+### This is the boxplot of duration across number of cores with notches
+```{r}
+# Notches are used to compare groups; if the notches of two boxes do not overlap, 
+# this suggests that the difference in medians is statistically significantly.
+breaksDurations <- c(250000, 500000, 750000, 1000000, 1250000, 1500000)
+applicationsRuntimeExt %>%
+  ggplot(mapping = aes(x = as.integer(coresMax),
+                       y = duration, group = coresMax)) +
+  geom_boxplot(notch = TRUE) + # shows confidence interval for each segment, if overlap then no statistical significance 
+  ggtitle("Duration per Number of Cores") + 
+  labs(x = "Number of Cores", y = "Duration (in ms)") + 
+  coord_cartesian(ylim = c(0, 1500000)) + # cut off unnecessary outliers above boxplot
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  scale_y_continuous(labels = comma, breaks = breaksDurations)
+```
+
+
+### Comparison of Mean and Median (huge difference due to non-normal distribution)
+```{r}
+breaksDurMeanLog <- c(100000, 250000, 500000, 1000000, 1250000)
+summaryAppRuntime %>%
+  ggplot(mapping = aes(x = as.integer(coresMax), y = meanDuration)) +
+  geom_line(color = "blue") + 
+  geom_line(color = "green", mapping = aes(y = medianDuration)) +
+  ggtitle("Mean & Median Duration per Number of Cores") +
+  labs(x = "Number of Cores", y = "Duration (Mean or Median in ms)") + 
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  scale_y_log10(labels = comma, breaks = breaksDurMeanLog) +
+  scale_color_continuous(name = "Duration")
+```
+
+### Density plot of durations per number of cores
+```{r}
+require(ggforce)
+plot <- 
+  applicationsRuntimeExt %>%
+  mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+  ggplot(mapping = aes(x = duration)) +
+  geom_density() +
+  ggtitle("Density Plot of Durations (split by Number of Cores)") +
+  labs(x = "Duration (in ms)", y = "Density") +
+  scale_x_continuous(labels = comma)
+
+noPages <- n_pages(plot + facet_wrap_paginate(~ coresMax, ncol = 2, nrow = 2))
+for (page in 1:noPages) {
+  print(plot +  facet_wrap_paginate(~ coresMax, ncol = 2, nrow = 2, page = page))
+  # ggsave(file = file.path(plotDir, platform,
+  #                         paste0("durationCoresDensity-", platform, ".png")))
+}
+
+```
+
+### Density plot of durations per number of cores and dimensions
+```{r}
+
+plot <- applicationsRuntimeExt %>%
+  mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
+  ggplot(mapping = aes(x = duration)) +
+  geom_density() +
+  ggtitle("Density Plot of Durations (Dimensions and Number of Cores)") +
+  labs(x = "Duration", y = "Density") +
+  scale_x_continuous(labels = comma) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 10))
+
+
+ncol = 5; nrow = 5
+noPages <- n_pages(plot + facet_grid_paginate(dimensions ~ coresMax, 
+                                              ncol = ncol, nrow = nrow))
+for (page in 1:noPages) {
+  print(plot +  facet_grid_paginate(dimensions ~ coresMax, 
+                                    ncol = ncol, nrow = nrow, page = page))
+}
+```
+
+### Density plot of durations per number of cores
+```{r}
+breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
+applicationsRuntimeExt %>%
+  mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
+  ggplot(mapping = aes(x = dimensions)) +
+  geom_jitter(mapping = aes(y = duration, color = coresMax)) +
+  labs(x = "Dimensions", y = "Duration (in ms)") + 
+  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+  # facet_wrap(~ coresMax, ncol = 1) + 
+  ggtitle("Duration per Dimension/Cores")
+ggsave(file = file.path(plotDir, platform,
+                        paste0("durationDimensionsCores-", platform, ".png")))
+```
+
+## Get rid of outlier that seems wrong
+```{r}
+tableColumns <- c("id", "appName", "duration")
+applicationsRuntimeExt %>%
+  filter(dimensions == "1176") %>%
+  arrange(duration) %>%
+  select(one_of(tableColumns)) %>%
+  head(5) %>%
+  htmlTable()
+```
+```{r}
+applicationsRuntimeExt %<>% # change underlying data
+  filter(id != "app-20170622153528-2249")
+```
+
+## Try previous plot again
+```{r}
+breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
+applicationsRuntimeExt %>%
+  mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
+  ggplot(mapping = aes(x = dimensions)) +
+  geom_jitter(mapping = aes(y = duration, color = coresMax)) +
+  labs(x = "Dimensions", y = "Duration (in ms)") + 
+  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+  # facet_wrap(~ coresMax, ncol = 1) + 
+  ggtitle("Duration per Dimension/Cores")
+ggsave(file = file.path(plotDir, platform,
+                        paste0("durationDimensionsCores-", platform, ".png")))
+```
+
+## Mean and sd duration per memory size
+```{r}
+summaryAppMemRuntime <-
+  applicationsRuntimeExt %>%
+  mutate(coresMax = as.integer(coresMax)) %>%
+  group_by(execMem, coresMax) %>%
+  summarise(meanDuration = mean(duration),
+            medianDuration = median(duration),
+            sdDuration = sd(duration)) %>%
+  setorder(execMem, coresMax)
+
+summaryAppMemRuntime
+```
+
+## Graphical presentation
+
+### Median Duration per Number of Cores and Memory
+```{r}
+breaksDurMeanLog <- c(150000, 200000, 250000, 350000, 450000)
+summaryAppMemRuntime %>%
+  ggplot(mapping = aes(x = coresMax, y = medianDuration, group = execMem, 
+                       col = execMem, shape = execMem)) +
+  geom_line() + geom_point() +
+  ggtitle("Median Duration per Number of Cores") +
+  labs(x = "Number of Cores", y = "Median Duration (in ms)") + 
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  scale_y_log10(labels = comma, breaks = breaksDurMeanLog) +
+  scale_color_discrete(name = "Memory") +
+  scale_shape_discrete(name = "Memory") + 
+  theme(legend.position = "right")
+```
+
+```{r}
+breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
+execMems <- c("1G", "2G", "3G")
+
+for (execMem in execMems) {
+  plot <- applicationsRuntimeExt %>%
+    filter(execMem == execMem) %>%
+    mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+    mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
+    ggplot(mapping = aes(x = dimensions)) +
+    geom_jitter(mapping = aes(y = duration, color = coresMax)) +
+    labs(x = "Dimensions", y = "Duration (in ms)") + 
+    scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
+    ggtitle(paste0("Duration per Dimensions/Cores: Execution Memory ", execMem))
+  print(plot)
+  ggsave(file = file.path(plotDir, platform,
+                          paste0("durationDimensionsCores-", platform, "-ExecMem", execMem, ".png")))
+}
+
+```
+
+### Duration facetted per dimensions and cores
+```{r}
+dimensions <- as.character(sort(as.integer(unique(applicationsRuntimeExt[["dimensions"]]))))
+breaksDurationsLog <- c(65000, 75000, 125000, 200000, 250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
+
+for (dimension in dimensions) {
+  
+  plot <- applicationsRuntimeExt %>%
+    filter(dimensions == dimension) %>%
+    mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+    mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
+    ggplot(mapping = aes(x = coresMax, y = duration)) +
+    geom_boxplot(notch = TRUE) +
+    ggtitle(paste0("Durations per number of cores (Dimensions: ", dimension, ")")) +
+    labs(x = "maxCores", y = "Duration (in ms)") +
+    scale_y_log10(label = comma, breaks = breaksDurationsLog) +
+    theme(plot.title = element_text(size = 10))
+  print(plot)
+  ggsave(file = file.path(plotDir, platform,
+                          paste0("durationDimensions-", platform, "-Dim", dimension, ".png")))
+}
+```
+
+## Median Duration per cores for different dimensions
+```{r}
+summaryAppDimRuntime <-
+  applicationsRuntimeExt %>%
+  mutate(coresMax = as.integer(coresMax)) %>%
+  group_by(coresMax, dimensions) %>%
+  summarise(meanDuration = mean(duration),
+            medianDuration = median(duration),
+            sdDuration = sd(duration)) %>%
+  setorder(dimensions, coresMax)
+
+summaryAppDimRuntime
+```
+
+```{r}
+breaksDurMeanLog <- c(150000, 300000, 600000, 1500000, 3500000)
+summaryAppDimRuntime %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions)), 
+                                                       decreasing = TRUE))) %>% 
+  ggplot(mapping = aes(x = coresMax, y = medianDuration, group = dimensions, 
+                       col = dimensions)) +
+  geom_line() + geom_point() +
+  ggtitle("Median Duration per Dimensions/Number of Cores") +
+  labs(x = "Number of Cores", y = "Median Duration (in ms)") + 
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  scale_y_log10(labels = comma, breaks = breaksDurMeanLog) +
+  theme(legend.position = "right")
+
+ggsave(file = file.path(plotDir, platform,
+                        paste0("medianDurationSpeedup-", platform, ".png")))
+```
+
+## SpeedUp 
+```{r}
+summaryAppSpeedup <-
+  summaryAppDimRuntime %>%
+  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
+  group_by(dimensions) %>%
+  setorder(dimensions, coresMax) %>%
+  mutate(speedup = lag(medianDuration)/medianDuration - 1) %>%
+  mutate(speedup = ifelse(is.na(speedup), 0, speedup)) %>%
+  mutate(speedupCum = cumsum(speedup)) # cumulative sum of speedUp
+summaryAppSpeedup
+```
+
+```{r}
+summaryAppSpeedup %>%
+  ggplot(mapping = aes(x = coresMax, y = speedup, group = dimensions, 
+                       fill = dimensions)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  ggtitle("SpeedUp per Number of Cores/Dimensions") +
+  labs(x = "Number of Cores", y = "Speedup") + 
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2), limits = c(1.5,15.5)) +
+  theme(legend.position = "right")
+
+ggsave(file = file.path(plotDir, platform,
+                        paste0("speedupFactorDimCores-", platform, ".png")))
+```
+
+```{r}
+summaryAppSpeedup %>%
+  na.omit() %>%
+  setorder(-speedup) %>%
+  head(5)
+```
+
+```{r}
+summaryAppSpeedup %>%
+  na.omit() %>%
+  setorder(speedup) %>%
+  head(5)
+```
+
+```{r}
+breaksSpeedupCum <- c(1,2,3,4,5,6,7,8,9,10)
+summaryAppSpeedup %>%
+  ungroup(dimensions) %>%  
+  mutate(dimensions = factor(dimensions, levels = rev(levels(dimensions)))) %>%
+  group_by(dimensions)  %>%
+  mutate(speedup = ifelse(speedup == 0, 0, speedup - 1)) %>%
+  mutate(speedupCum = cumsum(speedup)) %>%
+
+  ggplot(mapping = aes(x = coresMax, y = speedupCum, group = dimensions, 
+                       col = dimensions)) +
+  geom_line() + geom_point() +
+  ggtitle("Cumulative SpeedUp per Number of Cores/Dimensions") +
+  labs(x = "Number of Cores", y = "Cumulative Speedup") + 
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  # scale_y_log10(breaks = breaksSpeedupCum) +
+  theme(legend.position = "right")
+
+ggsave(file = file.path(plotDir, platform,
+                        paste0("speedupCumulativeDimCores-", platform, ".png")))
+```
+
