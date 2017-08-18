@@ -22,7 +22,7 @@ load(file = file.path(dataDir, paste0("outputParamsExt-", platform, ".Rda")))
 load(file = file.path(dataDir, paste0("phasesRuntime-", platform, ".Rda")))
 ```
 
-## Analze max, min, mean, median and sd of data
+## Analyze max, min, mean, median and sd of data
 ```{r}
 phasesRuntime %>%
   group_by_(.dots = c("phase")) %>%
@@ -270,7 +270,6 @@ ggsave(file = file.path(plotDir, platform,
 ### Curve of Prediction phase duration vs. dimensions and testObservations
 ```{r}
 breaksDurationsLog <- c(50000, 250000, 500000, 1000000)
-
 phasesRuntime %>%
   ungroup() %>%
   filter(phase == "prediction") %>%
@@ -285,4 +284,88 @@ phasesRuntime %>%
 
 ggsave(file = file.path(plotDir, platform, 
                         paste0("phasePredictionDurationDimensions-", platform, ".png")))
+```
+
+## Break up duration and examine percentages
+```{r}
+require(mltools)
+phasesBinRuntime <- phasesRuntime # no usage of dplyr syntax
+phasesBinRuntime[["durationRange"]] <- bin_data(phasesRuntime[["appDuration"]], 
+                                                bins = 25, binType = "quantile")
+
+table(phasesBinRuntime[["durationRange"]]) # equal sized bins
+```
+```{r}
+roundCols <- c("maxPerc", "minPerc", "meanPerc", "medianPerc", "sdPerc")
+phasesBinRuntime %>%
+  mutate(phase = as.character(phase)) %>%
+  group_by_(.dots = c("phase", "durationRange")) %>%
+  summarize(maxPerc = max(phasePerc),
+            minPerc = min(phasePerc),
+            meanPerc = mean(phasePerc),
+            medianPerc = median(phasePerc),
+            sdPerc = sd(phasePerc)) %>%
+  mutate_at(.vars = roundCols, .funs = funs(round(., 3)))
+```
+
+```{r}
+roundCols <- c("maxPerc", "minPerc", "meanPerc", "medianPerc", "sdPerc")
+phasesBinSumRuntime <- 
+  phasesBinRuntime %>%
+  mutate(phase = as.character(phase)) %>%
+  group_by_(.dots = c("durationRange", "phase")) %>%
+  summarize(maxPerc = max(phasePerc),
+            minPerc = min(phasePerc),
+            meanPerc = mean(phasePerc),
+            medianPerc = median(phasePerc),
+            sdPerc = sd(phasePerc)) %>%
+  mutate_at(.vars = roundCols, .funs = funs(round(., 3)))
+phasesBinSumRuntime
+```
+
+## Plot changes in percentage of duration
+```{r}
+phasesBinSumRuntime %>%
+  ggplot(mapping = aes(x = durationRange, y = medianPerc, 
+                       group = phase, col = phase)) +
+  geom_line() + geom_point() +
+  ggtitle("Percentages of phases for runtime ranges") +
+  labs(x = "Duration range", y = "Median Duration (in ms)") + 
+  theme(legend.position = "right") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file = file.path(plotDir, platform, 
+                        paste0("phaseRangeDurationPerc-", platform, ".png")))
+```
+
+## Plot changes in percentages of duration - no aggregation
+```{r}
+breaksDurationsLog <- c(100000, 250000, 500000, 1000000, 2500000, 5000000)
+phasesRuntime %>%
+  ggplot(mapping = aes(x = duration, y = phasePerc, 
+                       group = phase, col = phase)) +
+  geom_jitter(alpha = 0.3) +
+  geom_smooth(aes(linetype = phase), color = "black", method = "gam") +
+  geom_smooth(aes(linetype = phase), color = "grey30", method = "loess") +
+  ggtitle("Percentages of phases for runtime") +
+  labs(x = "Duration (in ms)", y = "Percentage of Duration") + 
+  scale_x_log10(labels = comma, breaks = breaksDurationsLog) +
+  theme(legend.position = "right") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file = file.path(plotDir, platform, 
+                        paste0("phaseDurationPerc-", platform, ".png")))
+```
+
+### Boxplots per duration range and phase
+```{r}
+phasesBinRuntime %>%
+  ggplot(mapping = aes(x = durationRange, y = phasePerc, 
+                       group = interaction(durationRange, phase), # allows grouping based on two variables
+                       col = phase, fill = phase, dodge = phase)) +
+  geom_boxplot(notch = TRUE) +
+  ggtitle("Percentages of phases for runtime ranges") +
+  labs(x = "Duration range", y = "Percentage of Duration") + 
+  theme(legend.position = "right") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```

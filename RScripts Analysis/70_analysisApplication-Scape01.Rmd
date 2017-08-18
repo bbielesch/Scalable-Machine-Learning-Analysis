@@ -215,11 +215,22 @@ for (page in 1:noPages) {
   # ggsave(file = file.path(plotDir, platform,
   #                         paste0("durationCoresDensity-", platform, ".png")))
 }
+```
 
+```{r}
+require(ggforce)
+require(ggjoy)
+applicationsRuntimeExt %>%
+  mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
+  ggplot(mapping = aes(x = duration, y = coresMax)) +
+  geom_joy() +
+  ggtitle("Density Plot of Durations (split by Number of Cores)") +
+  labs(x = "Duration (in ms)", y = "Density per number of cores") +
+  scale_x_continuous(labels = comma)
 ```
 
 ### Density plot of durations per number of cores and dimensions
-```{r}
+```{r eval=FALSE}
 
 plot <- applicationsRuntimeExt %>%
   mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
@@ -233,7 +244,7 @@ plot <- applicationsRuntimeExt %>%
         plot.title = element_text(size = 10))
 
 
-ncol = 5; nrow = 5
+ncol = 3; nrow = 3
 noPages <- n_pages(plot + facet_grid_paginate(dimensions ~ coresMax, 
                                               ncol = ncol, nrow = nrow))
 for (page in 1:noPages) {
@@ -242,7 +253,7 @@ for (page in 1:noPages) {
 }
 ```
 
-### Density plot of durations per number of cores
+### Plot of durations per number of cores
 ```{r}
 breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
 applicationsRuntimeExt %>%
@@ -259,7 +270,7 @@ ggsave(file = file.path(plotDir, platform,
 ```
 
 ## Get rid of outlier that seems wrong
-```{r}
+```{r eval=FALSE}
 tableColumns <- c("id", "appName", "duration")
 applicationsRuntimeExt %>%
   filter(dimensions == "1176") %>%
@@ -271,22 +282,6 @@ applicationsRuntimeExt %>%
 ```{r}
 applicationsRuntimeExt %<>% # change underlying data
   filter(id != "app-20170622153528-2249")
-```
-
-## Try previous plot again
-```{r}
-breaksDurationsLog <- c(250000, 500000, 1000000, 2000000, 3000000, 4000000, 5000000, 6000000)
-applicationsRuntimeExt %>%
-  mutate(coresMax = factor(coresMax, levels = sort(as.integer(unique(coresMax))))) %>%
-  mutate(dimensions = factor(dimensions, levels = sort(as.integer(unique(dimensions))))) %>% 
-  ggplot(mapping = aes(x = dimensions)) +
-  geom_jitter(mapping = aes(y = duration, color = coresMax)) +
-  labs(x = "Dimensions", y = "Duration (in ms)") + 
-  scale_y_log10(labels = comma, breaks = breaksDurationsLog) +
-  # facet_wrap(~ coresMax, ncol = 1) + 
-  ggtitle("Duration per Dimension/Cores")
-ggsave(file = file.path(plotDir, platform,
-                        paste0("durationDimensionsCores-", platform, ".png")))
 ```
 
 ## Mean and sd duration per memory size
@@ -438,13 +433,13 @@ summaryAppSpeedup %>%
   head(5)
 ```
 
+## Cumulative Speedup per dimensions
 ```{r}
-breaksSpeedupCum <- c(1,2,3,4,5,6,7,8,9,10)
+breaksSpeedupCum <- c(1,2,3)
 summaryAppSpeedup %>%
   ungroup(dimensions) %>%  
   mutate(dimensions = factor(dimensions, levels = rev(levels(dimensions)))) %>%
   group_by(dimensions)  %>%
-  mutate(speedup = ifelse(speedup == 0, 0, speedup - 1)) %>%
   mutate(speedupCum = cumsum(speedup)) %>%
 
   ggplot(mapping = aes(x = coresMax, y = speedupCum, group = dimensions, 
@@ -458,5 +453,50 @@ summaryAppSpeedup %>%
 
 ggsave(file = file.path(plotDir, platform,
                         paste0("speedupCumulativeDimCores-", platform, ".png")))
+```
+
+## Cumulative Speedup per number of cores and number of observations
+```{r}
+breaksTrainObs <- c(0, 25000, 30000, 50000, 140000, 180000, 250000, 330000, 350000, 380000)
+summaryAppObsRuntime <-
+  applicationsRuntimeExt %>%
+  mutate(coresMax = as.integer(coresMax)) %>%
+  filter(coresMax > 1) %>%
+  mutate(trainObsBins = cut(trainObservations, breaks = breaksTrainObs, dig.lab = 10)) %>%
+  # mutate(trainObservations = factor(trainObservations)) %>%
+  group_by(coresMax, trainObsBins) %>%
+  summarise(meanDuration = mean(duration),
+            medianDuration = median(duration),
+            sdDuration = sd(duration)) %>%
+  setorder(trainObsBins, coresMax)
+
+summaryAppObsRuntime
+```
+
+```{r}
+summaryAppObsSpeedup <-
+  summaryAppObsRuntime %>%
+  group_by(trainObsBins) %>%
+  setorder(trainObsBins, coresMax) %>%
+  mutate(speedup = lag(medianDuration)/medianDuration - 1) %>%
+  mutate(speedup = ifelse(is.na(speedup), 0, speedup)) %>%
+  mutate(speedupCum = cumsum(speedup)) # cumulative sum of speedUp
+summaryAppObsSpeedup
+```
+
+```{r}
+breaksSpeedupCum <- c(1,2,3)
+summaryAppObsSpeedup %>%
+  group_by(trainObsBins)  %>%
+  mutate(speedupCum = cumsum(speedup)) %>%
+  
+  ggplot(mapping = aes(x = coresMax, y = speedupCum, group = trainObsBins, 
+                       col = trainObsBins)) +
+  geom_line() + geom_point() +
+  ggtitle("Cumulative SpeedUp per Number of Cores/Number of training observations") +
+  labs(x = "Number of Cores", y = "Cumulative Speedup") + 
+  scale_x_continuous(breaks = seq(from = 2, to = 14, by = 2)) +
+  # scale_y_log10(breaks = breaksSpeedupCum) +
+  theme(legend.position = "right")
 ```
 
